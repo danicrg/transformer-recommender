@@ -87,20 +87,20 @@ class Tokenizer:
 
 
 def prepare_sequences(ratings, tokenizer):
+    ratings = ratings.copy()
     ratings["movie_string"] = ratings.apply(lambda x: f"movie_{x['movie_id']}", axis=1)
     ratings["rating_string"] = ratings.apply(lambda x: f"rating_{x['rating']}", axis=1)
 
-    tokenizer.train(ratings["movie_string"].unique())
-
     sequences = ratings.groupby("user_id").apply(
-        lambda x: ["<BOS>"] + [item for pair in zip(x['movie_string'], x['rating_string']) for item in pair]
+        lambda x: ["<BOS>"] + [item for pair in zip(x['movie_string'], x['rating_string']) for item in pair],
+        include_groups=False
     )
 
-    tokenized_sequences = sequences.apply(tokenizer.encode).tolist()
+    tokenized_sequences = sequences.apply(tokenizer.encode).values
     continuous_sequence = [item for seq in tokenized_sequences for item in seq]
     return continuous_sequence
 
-def get_random_batch(continuous_sequence, batch_size=32, block_size=128):
+def get_random_batch(continuous_sequence, batch_size=32, block_size=256):
     sequence_length = len(continuous_sequence)
     x_list, y_list = [], []
 
@@ -120,12 +120,16 @@ def main():
 
     # Initialize tokenizer and prepare sequences
     tokenizer = Tokenizer()
+    tokenizer.train(train_ratings["movie_id"].unique())
+
+    # Process sequences
     continuous_train_sequence = prepare_sequences(train_ratings, tokenizer)
     continuous_test_sequence = prepare_sequences(test_ratings, tokenizer)
 
     # Generate a random batch for training
     x, y = get_random_batch(continuous_train_sequence)
-    print(x, y)
+    print(x)
+    print(y)
 
 if __name__ == "__main__":
     main()
