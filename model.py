@@ -143,8 +143,8 @@ class GPTModel(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         self.block_size = config.block_size
-        self.mask_movies = config.mask_movies
         self.device = config.device
+        self.criteria = config.criteria
 
 
     def forward(self, idx, targets=None):
@@ -165,13 +165,18 @@ class GPTModel(nn.Module):
         logits = logits.view(B * T, C)
         targets = targets.view(B * T)
 
-        if self.mask_movies:
+        if self.criteria == "cross_entropy":
+            loss = F.cross_entropy(logits, targets)
+        if self.criteria == "masked_cross_entropy":
             mask = targets > 5
             targets = targets.masked_fill(mask, 0)
+            loss = F.cross_entropy(logits, targets, ignore_index=0)
+        if self.criteria == "rating_masked_cross_entropy":
+            mask = targets <= 5
+            targets = targets.masked_fill(mask, 0)
             loss = F.cross_entropy(logits[:, :6], targets, ignore_index=0)
-        else:
-            loss = F.cross_entropy(logits, targets)
-
+        if self.criteria == "distance_weighted_loss":
+            loss = custom_distance_weighted_loss_with_mask(logits, targets, 6, 0)
         return logits, loss
     
     def _init_weights(self, module):
@@ -191,3 +196,46 @@ class GPTModel(nn.Module):
             idx = torch.cat((idx, index), dim=-1)  # Becomes (B, T + 1)
 
         return idx
+
+
+def custom_distance_weighted_loss_with_mask(outputs, targets, num_classes, mask_value):
+    """
+    A custom distance-weighted loss function that incorporates class masking.
+
+    Args:
+    - outputs: The raw logits from the model (B, num_classes).
+    - targets: The ground truth labels (B,).
+    - num_classes: The total number of classes.
+    - mask_value: The value used to indicate which targets to mask/ignore.
+
+    Returns:
+    - The computed loss.
+    """
+    # Convert logits to softmax probabilities
+    softmax_probs = F.softmax(outputs, dim=-1)
+    
+    # Compute a mask for targets to be included in loss computation
+    mask = targets != mask_value
+    masked_targets = targets[mask]
+    
+    # If no targets are left after masking, return a null loss
+    if len(masked_targets) == 0:
+        return torch.tensor(0.0, requires_grad=True)
+
+    # Apply mask to softmax probabilities
+    masked_softmax_probs = softmax_probs[mask]
+    
+    # Compute distances and weights for masked targets only
+    distances = torch.abs(torch.arange(num_classes, device=outputs.device).unsqueeze(0) - masked_targets.unsqueeze(1)).float()
+    weights = 1 - (distances / num_classes)
+    
+    # Convert masked targets to one-hot encoding
+    target_probs = F.one_hot(masked_targets, num_classes=num_classes).float()
+    
+    # Apply weights to the target probabilities
+    weighted_targets = target_probs * weights
+    
+    # Compute loss using MSE between weighted softmax probabilities and weighted targets
+    loss = torch.mean((masked_softmax_probs - weighted_targets) ** 2)
+
+    return loss

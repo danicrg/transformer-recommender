@@ -9,6 +9,8 @@ from torch.nn import functional as F
 from model import RandomRatingGenerator
 import numpy as np
 
+import matplotlib.pyplot as plt
+
 # Constants for data processing
 USER_DATA_FILE = "ml-1m/users.dat"
 RATINGS_DATA_FILE = "ml-1m/ratings.dat"
@@ -101,9 +103,8 @@ class Tokenizer:
     def decode(self, indices):
         return [self.itos.get(idx, "<UNK>") for idx in indices]
 
-def get_continuous_sequence(sequences, tokenizer):
-    tokenized_sequences = sequences.apply(tokenizer.encode).values
-    continuous_sequence = [item for seq in tokenized_sequences for item in seq]
+def get_continuous_sequence(sequences):
+    continuous_sequence = [item for seq in sequences for item in seq]
     return continuous_sequence
 
 def get_random_batch(continuous_sequence, batch_size=32, block_size=256):
@@ -146,7 +147,7 @@ def evaluate_rmse(model, test_tokenized_sequences, n_samples=100, device="cpu"):
             x = torch.tensor(sequence[:-1], dtype=torch.long).unsqueeze(0).to(device)
             y = torch.tensor(sequence[1:], dtype=torch.long).unsqueeze(0).to(device)
             output, _ = model(x)
-            ratings_output = torch.argmax(F.softmax(output[:, -1, 0:6], dim=-1), dim=-1)
+            ratings_output = torch.argmax(output[:, -1, 0:6], dim=-1)
             ratings_target = y[:, -1]
 
             loss = F.mse_loss(ratings_output.float(), ratings_target.float())
@@ -164,15 +165,25 @@ def main():
     # Get movie ids from train_sequences to train tokenizer, which are
     # every other item in the sequence starting from the second item
 
+    # Distribution of length to train sequences
+    train_sequences.apply(len).hist(bins=30)
+    plt.title("Distribution of sequence lengths")
+    plt.show()
+
+    print("Number of train sequences: ", len(train_sequences))
+    print("Number of sequences with length > 512: ", (train_sequences.apply(len) > 512).sum())
+    print("Ratio", (train_sequences.apply(len) > 512).mean())
+
+
     # Initialize tokenizer and prepare sequences
     tokenizer = Tokenizer()
-    tokenizer.train(movies["movie_id"].unique().values)
+    tokenizer.train(movies["movie_id"].unique())
 
     # Process sequences
     train_tokenized_sequences = train_sequences.apply(tokenizer.encode).values
     test_tokenized_sequences = test_sequences.apply(tokenizer.encode).values
 
-    continuous_train_sequence = get_continuous_sequence(train_sequences, tokenizer)
+    continuous_train_sequence = get_continuous_sequence(train_tokenized_sequences)
     # Generate a random batch for training
     x, y = get_random_batch(continuous_train_sequence)
 
