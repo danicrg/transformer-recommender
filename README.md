@@ -1,6 +1,11 @@
 # transformer-recommender
 A recommender based on language modeling with a GPT like model
 
+## To-do's
+- [ ] Test batching with padding for each user sequence
+- [ ] Test bigger and smaller block sizes
+- [ ] Non-trainable positional embeddings
+
 
 ## Results
 ### Experiment 1

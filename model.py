@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 
+import numpy as np
+
 class RandomRatingGenerator(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
@@ -152,8 +154,9 @@ class GPTModel(nn.Module):
         B, T = idx.shape
 
         tok_embed = self.token_embedding_table(idx)  # (B, T, n_embed) C being embed size in this case
-        pos_embed = self.position_embedding(torch.arange(T, device=self.device))  # (T, C)
-        x = tok_embed + pos_embed
+        pos_embed = self.position_embedding(torch.arange(self.block_size - T, self.block_size, device=self.device))
+        
+        x = tok_embed + pos_embed  # (B, T, C)
         x = self.blocks(x)
         x = self.ln(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)
@@ -166,17 +169,19 @@ class GPTModel(nn.Module):
         targets = targets.view(B * T)
 
         if self.criteria == "cross_entropy":
-            loss = F.cross_entropy(logits, targets)
+            loss = F.cross_entropy(logits, targets, ignore_index=5)
         if self.criteria == "masked_cross_entropy":
-            mask = targets > 5
-            targets = targets.masked_fill(mask, 0)
-            loss = F.cross_entropy(logits, targets, ignore_index=0)
+            mask = targets > 4
+            targets = targets.masked_fill(mask, 5)
+            loss = F.cross_entropy(logits, targets, ignore_index=5)
         if self.criteria == "rating_masked_cross_entropy":
-            mask = targets <= 5
-            targets = targets.masked_fill(mask, 0)
-            loss = F.cross_entropy(logits[:, :6], targets, ignore_index=0)
+            mask = targets > 4
+            targets = targets.masked_fill(mask, 5)
+            loss = F.cross_entropy(logits[:, :5], targets, ignore_index=5)
         if self.criteria == "distance_weighted_loss":
-            loss = custom_distance_weighted_loss_with_mask(logits, targets, 6, 0)
+            mask = targets > 4
+            targets = targets.masked_fill(mask, 5)
+            loss = custom_distance_weighted_loss_with_mask(logits[:, :5], targets, 5, 5)
         return logits, loss
     
     def _init_weights(self, module):
@@ -225,17 +230,10 @@ def custom_distance_weighted_loss_with_mask(outputs, targets, num_classes, mask_
     # Apply mask to softmax probabilities
     masked_softmax_probs = softmax_probs[mask]
     
-    # Compute distances and weights for masked targets only
-    distances = torch.abs(torch.arange(num_classes, device=outputs.device).unsqueeze(0) - masked_targets.unsqueeze(1)).float()
-    weights = 1 - (distances / num_classes)
-    
     # Convert masked targets to one-hot encoding
     target_probs = F.one_hot(masked_targets, num_classes=num_classes).float()
     
-    # Apply weights to the target probabilities
-    weighted_targets = target_probs * weights
-    
     # Compute loss using MSE between weighted softmax probabilities and weighted targets
-    loss = torch.mean((masked_softmax_probs - weighted_targets) ** 2)
+    loss = torch.mean((masked_softmax_probs - target_probs) ** 2)
 
     return loss

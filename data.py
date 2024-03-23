@@ -81,18 +81,19 @@ class Tokenizer:
     def __init__(self):
         # Initialize the vocabulary with the bos_token and ratings tokens
         self.stoi = {
-            "<BOS>": 0,
-            "rating_1": 1,
-            "rating_2": 2,
-            "rating_3": 3,
-            "rating_4": 4,
-            "rating_5": 5,
+            "rating_1": 0,
+            "rating_2": 1,
+            "rating_3": 2,
+            "rating_4": 3,
+            "rating_5": 4,
+            "<BOS>": 5, # Beginning of sequence
             "<UNK>": 6,
         }
 
     def train(self, movie_ids):
+
         unique_movie_ids = set(movie_ids)
-        self.stoi.update({movie_id: idx for idx, movie_id in enumerate(unique_movie_ids, start=len(self.stoi))})
+        self.stoi.update({f"movie_{movie_id}": idx for idx, movie_id in enumerate(unique_movie_ids, start=len(self.stoi))})
         self.itos = {idx: token for token, idx in self.stoi.items()}
         self.vocab_size = len(self.stoi)
         print("Vocabulary size:", self.vocab_size)
@@ -147,7 +148,7 @@ def evaluate_rmse(model, test_tokenized_sequences, n_samples=100, device="cpu"):
             x = torch.tensor(sequence[:-1], dtype=torch.long).unsqueeze(0).to(device)
             y = torch.tensor(sequence[1:], dtype=torch.long).unsqueeze(0).to(device)
             output, _ = model(x)
-            ratings_output = torch.argmax(output[:, -1, 0:6], dim=-1)
+            ratings_output = torch.argmax(output[:, -1, :5], dim=-1)
             ratings_target = y[:, -1]
 
             loss = F.mse_loss(ratings_output.float(), ratings_target.float())
@@ -159,21 +160,10 @@ def evaluate_rmse(model, test_tokenized_sequences, n_samples=100, device="cpu"):
 def main():
     # Load and preprocess data
     users, ratings, movies = load_data()
+    print("Number of ratings", len(ratings))
+
     sequences = preprocess_data(ratings)
     train_sequences, test_sequences = train_test_split(sequences)
-
-    # Get movie ids from train_sequences to train tokenizer, which are
-    # every other item in the sequence starting from the second item
-
-    # Distribution of length to train sequences
-    train_sequences.apply(len).hist(bins=30)
-    plt.title("Distribution of sequence lengths")
-    plt.show()
-
-    print("Number of train sequences: ", len(train_sequences))
-    print("Number of sequences with length > 512: ", (train_sequences.apply(len) > 512).sum())
-    print("Ratio", (train_sequences.apply(len) > 512).mean())
-
 
     # Initialize tokenizer and prepare sequences
     tokenizer = Tokenizer()
@@ -194,6 +184,52 @@ def main():
     rmse = evaluate_rmse(model, test_tokenized_sequences, 100)
     print("RMSE: ", rmse)
 
+def test():
+    from torch.nn.utils.rnn import pad_sequence
+
+    users, ratings, movies = load_data()
+    print("Number of ratings", len(ratings))
+
+    sequences = preprocess_data(ratings)
+    train_sequences, test_sequences = train_test_split(sequences)
+
+    tokenizer = Tokenizer()
+    tokenizer.train(movies["movie_id"].unique())
+
+    # Process sequences
+    train_tokenized_sequences = train_sequences.apply(tokenizer.encode).values
+    test_tokenized_sequences = test_sequences.apply(tokenizer.encode).values
+
+    print(train_sequences)
+    print(train_tokenized_sequences[0])
+
+    batch_size = 4
+
+    # Sort train_tokenized_sequences by length
+    train_sequences = sorted(train_tokenized_sequences, key=len)
+
+    # Create batches
+    batches = [train_sequences[i:i + batch_size] for i in range(0, len(train_sequences), batch_size)]
+
+    # Pad sequences within each batch
+    padded_batches = []
+    for batch in batches:
+        # Pad sequences on the left with zeros
+        padded_batch = pad_sequence([torch.tensor(seq) for seq in batch], batch_first=True, padding_value=0)
+        padded_batches.append(padded_batch)
+
+    random_batch_index = torch.randint(0, len(padded_batches), (1,)).item()
+    random_batch = padded_batches[random_batch_index]
+
+    # Create x and y
+    x = random_batch[:, :-1]
+    y = random_batch[:, 1:]
+
+    print(x)
+    print(y)
+        
+
 
 if __name__ == "__main__":
-    main()
+    # main()
+    test()
