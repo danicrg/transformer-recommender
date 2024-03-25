@@ -8,6 +8,8 @@ import torch
 from torch.nn import functional as F
 from model import RandomRatingGenerator
 import numpy as np
+from typing import List
+
 
 import matplotlib.pyplot as plt
 
@@ -55,10 +57,10 @@ def load_data():
 
     return users, ratings, movies
 
-def preprocess_data(ratings):
+def ratings_to_sequences(ratings):
     # Sort ratings by user_id and unix_timestamp
     ratings.sort_values(by=["user_id", "unix_timestamp"], inplace=True)
-    # Reserve a portion of ratings for testing
+
     ratings = ratings.copy()
     ratings["movie_string"] = ratings.apply(lambda x: f"movie_{x['movie_id']}", axis=1)
     ratings["rating_string"] = ratings.apply(lambda x: f"rating_{x['rating']}", axis=1)
@@ -69,12 +71,19 @@ def preprocess_data(ratings):
     )
     return sequences
 
-def train_test_split(sequences):
+def train_test_split(sequences, test_ratio=TEST_DATA_RATIO):
+    n_ratings = sum([(len(seq) -1) / 2 for seq in sequences])
+    n_ratings_to_test = int(n_ratings * test_ratio)
+    test_ratings_per_user = n_ratings_to_test // len(sequences)
+
+    print("Final test ratio", test_ratings_per_user * len(sequences) / n_ratings)
+    print("Number of test ratings per user", test_ratings_per_user)
+
     # For train take all movies and ratings except the last one
-    train_sequences = sequences.apply(lambda x: x[:-2])
+    train_sequences = sequences.apply(lambda x: x[:-test_ratings_per_user*2])
     # For test take all movies and ratings
     test_sequences = sequences
-    return train_sequences, test_sequences
+    return train_sequences, test_sequences, test_ratings_per_user
 
 # Tokenizer class for encoding and decoding movie and rating information
 class Tokenizer:
@@ -124,6 +133,53 @@ def get_random_batch(continuous_sequence, batch_size=32, block_size=256):
 
     return torch.tensor(x_list, dtype=torch.long), torch.tensor(y_list, dtype=torch.long)
 
+def pad_sequence(sequences: np.array, batch_first=True, padding_value=0, padding_position="left"):
+    """Returns a torch.tensor of shape (batch_size, max_length) where the sequences are padded to the <padding_position> with the padding value."""
+    # Find the length of the longest sequence
+    max_length = max([len(seq) for seq in sequences])
+
+    # Create a new tensor with the same number of dimensions as the input sequences
+    output = torch.full((len(sequences), max_length), padding_value)
+
+    # Fill the output tensor with the sequences
+    for i, seq in enumerate(sequences):
+        if padding_position == "left":
+            output[i, -len(seq):] = torch.tensor(seq)
+        else:
+            output[i, :len(seq)] = torch.tensor(seq)
+
+    if batch_first:
+        return output
+    else:
+        return output.T
+
+def get_batch_padded(train_sequences, batch_size=32, how="random"):
+    sorted_train_sequences = sorted(train_sequences, key=len)
+    
+    # Create batches
+    batches = [sorted_train_sequences[i:i + batch_size] for i in range(0, len(sorted_train_sequences), batch_size)]
+    n_batches = len(batches)
+    # Pad sequences within each batch
+    padded_batches = []
+    for batch in batches:
+        # Pad sequences on the left with zeros
+        padded_batch = pad_sequence(batch, padding_value=5)
+        padded_batches.append(padded_batch)
+
+    batch_index = 0
+    while True:
+        if how == "random":
+            random_batch_index = torch.randint(0, len(padded_batches), (1,)).item()
+            batch = padded_batches[random_batch_index]
+        if how == "sequential":
+            batch = padded_batches[batch_index]
+            batch_index = (batch_index + 1) % n_batches
+        # Create x and y
+        x = batch[:, :-1]
+        y = batch[:, 1:]
+
+        yield x, y
+
 def evaluate(model, test_tokenized_sequences, n_samples=100, device="cpu"):
     # Evaluate the model on the test set
     model.eval()
@@ -139,22 +195,28 @@ def evaluate(model, test_tokenized_sequences, n_samples=100, device="cpu"):
         
     return total_loss / n_samples
 
-def evaluate_rmse(model, test_tokenized_sequences, n_samples=100, device="cpu"):
-    # Evaluate the model on the test set
+def evaluate_rmse(model, batch_generator, n_samples=100, device="cpu", test_ratings_per_sequence=1):
     model.eval()
     with torch.no_grad():
         total_loss = 0.0
-        for sequence in np.random.choice(test_tokenized_sequences, n_samples, replace=False):
-            x = torch.tensor(sequence[:-1], dtype=torch.long).unsqueeze(0).to(device)
-            y = torch.tensor(sequence[1:], dtype=torch.long).unsqueeze(0).to(device)
-            output, _ = model(x)
-            ratings_output = torch.argmax(output[:, -1, :5], dim=-1)
-            ratings_target = y[:, -1]
+        total_n_sequences = 0
+        for _ in range(n_samples):
+            x, y = next(batch_generator)
+            output, _ = model(x.to(device))
+            ratings_output = torch.argmax(output[:, -test_ratings_per_sequence*2:, :5], dim=-1)
+            ratings_target = y[:, -test_ratings_per_sequence*2:].to(device)
+
+            # Take every other item, which are the ratings
+            ratings_output = ratings_output[:, 1::2]
+            ratings_target = ratings_target[:, 1::2]
 
             loss = F.mse_loss(ratings_output.float(), ratings_target.float())
-            total_loss += loss.item()
-        
-    return np.sqrt(total_loss / n_samples)
+            # Each batch can be of variable size so we need to weight the loss
+            total_loss += loss.item() * x.size(0)
+            total_n_sequences += x.size(0)
+    model.train()
+
+    return np.sqrt(total_loss / total_n_sequences)
 
 
 def main():
@@ -162,8 +224,8 @@ def main():
     users, ratings, movies = load_data()
     print("Number of ratings", len(ratings))
 
-    sequences = preprocess_data(ratings)
-    train_sequences, test_sequences = train_test_split(sequences)
+    sequences = ratings_to_sequences(ratings)
+    train_sequences, test_sequences, test_ratings_per_user = train_test_split(sequences)
 
     # Initialize tokenizer and prepare sequences
     tokenizer = Tokenizer()
@@ -172,64 +234,22 @@ def main():
     # Process sequences
     train_tokenized_sequences = train_sequences.apply(tokenizer.encode).values
     test_tokenized_sequences = test_sequences.apply(tokenizer.encode).values
+    
 
     continuous_train_sequence = get_continuous_sequence(train_tokenized_sequences)
     # Generate a random batch for training
     x, y = get_random_batch(continuous_train_sequence)
+    random_batch = next(get_batch_padded(train_tokenized_sequences))
+    print(random_batch[0].shape, random_batch[1].shape)
+    print(random_batch)
 
     # Initialize the model
     model = RandomRatingGenerator(tokenizer.vocab_size)
     eval_loss = evaluate(model, test_tokenized_sequences)
     print(eval_loss)
-    rmse = evaluate_rmse(model, test_tokenized_sequences, 100)
+    rmse = evaluate_rmse(model, test_tokenized_sequences, 100, "cpu", test_ratings_per_user), 
     print("RMSE: ", rmse)
-
-def test():
-    from torch.nn.utils.rnn import pad_sequence
-
-    users, ratings, movies = load_data()
-    print("Number of ratings", len(ratings))
-
-    sequences = preprocess_data(ratings)
-    train_sequences, test_sequences = train_test_split(sequences)
-
-    tokenizer = Tokenizer()
-    tokenizer.train(movies["movie_id"].unique())
-
-    # Process sequences
-    train_tokenized_sequences = train_sequences.apply(tokenizer.encode).values
-    test_tokenized_sequences = test_sequences.apply(tokenizer.encode).values
-
-    print(train_sequences)
-    print(train_tokenized_sequences[0])
-
-    batch_size = 4
-
-    # Sort train_tokenized_sequences by length
-    train_sequences = sorted(train_tokenized_sequences, key=len)
-
-    # Create batches
-    batches = [train_sequences[i:i + batch_size] for i in range(0, len(train_sequences), batch_size)]
-
-    # Pad sequences within each batch
-    padded_batches = []
-    for batch in batches:
-        # Pad sequences on the left with zeros
-        padded_batch = pad_sequence([torch.tensor(seq) for seq in batch], batch_first=True, padding_value=0)
-        padded_batches.append(padded_batch)
-
-    random_batch_index = torch.randint(0, len(padded_batches), (1,)).item()
-    random_batch = padded_batches[random_batch_index]
-
-    # Create x and y
-    x = random_batch[:, :-1]
-    y = random_batch[:, 1:]
-
-    print(x)
-    print(y)
-        
 
 
 if __name__ == "__main__":
-    # main()
-    test()
+    main()

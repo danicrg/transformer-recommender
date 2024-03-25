@@ -39,7 +39,7 @@ class AverageRatingGenerator(nn.Module):
         The output is a tensor of shape (batch_size, sequence_length, vocab_size)
 
         There should be a 1.0 in the position of the generated rating and 0.0 elsewhere
-        The rating positions are 1 through 5, and the movie positions are 6 through vocab_size
+        The rating positions are 0 through 4, and the movie positions are 6 through vocab_size
 
         The rating should be the average of the ratings of the movies in the sequence
         """
@@ -47,9 +47,12 @@ class AverageRatingGenerator(nn.Module):
         batch_size, sequence_length = x.size()
         output = torch.zeros(batch_size, sequence_length, self.vocab_size)
         for i in range(batch_size):
-            ratings = x[i, 2::2]
-            average_rating = torch.round(ratings.float().mean())
-            output[i, -1, int(average_rating)] = 1.0
+            for j in range(3, sequence_length):
+                if j % 2 == 0:
+                    continue
+                ratings = x[i, 2:j:2]
+                average_rating = torch.round(ratings.float().mean())
+                output[i, j, int(average_rating) - 1] = 1.0
 
         return output, None
 
@@ -151,6 +154,7 @@ class GPTModel(nn.Module):
 
     def forward(self, idx, targets=None):
         idx = idx[:, -self.block_size :]
+        
         B, T = idx.shape
 
         tok_embed = self.token_embedding_table(idx)  # (B, T, n_embed) C being embed size in this case
@@ -166,7 +170,7 @@ class GPTModel(nn.Module):
 
         B, T, C = logits.shape
         logits = logits.view(B * T, C)
-        targets = targets.view(B * T)
+        targets = targets[:, -T:].reshape(B * T)
 
         if self.criteria == "cross_entropy":
             loss = F.cross_entropy(logits, targets, ignore_index=5)
